@@ -7,16 +7,25 @@ import { redirect } from "next/navigation";
 
 const FormSchema = z.object({
     id: z.string(),
-    customerId: z.string(),
-    amount: z.coerce.number(),
+    customerId: z.string({invalid_type_error: 'Please select a customer.'}),
+    amount: z.coerce.number().gt(0, {message: 'Please enter an amount greater than $0.'}),
     date: z.string(),
-    status: z.enum(['pending' , 'paid']),
+    status: z.enum(['pending' , 'paid'], {invalid_type_error: 'Please select an invoice status.'}),
 })
  
 const CreateInvoice = FormSchema.omit({ id: true, date: true });
+const UpdateInvoice = FormSchema.omit({ id: true, date: true });
 
-export async function createInvoice(formData: FormData) {
+export type State = {
+    errors?: {
+      customerId?: string[];
+      amount?: string[];
+      status?: string[];
+    };
+    message?: string | null;
+  };
 
+export async function createInvoice(prevState: State, formData: FormData) {
     // const rawFormData = {
     //     customerId: formData.get('customerId'),
     //     amount: formData.get('amount'),
@@ -24,19 +33,73 @@ export async function createInvoice(formData: FormData) {
     // };
     //const rawFormData = Object.fromEntries(formData.entries()); //Se puede de cualquier manera
 
-    const { customerId, amount, status } = CreateInvoice.parse({ //PARA VALIDAR DE QUE TENGA EL TIPADO QUE DEBE DE TENER
+
+    
+    // Validate form fields using Zod
+    const validatedFields = CreateInvoice.safeParse({ //PARA VALIDAR DE QUE TENGA EL TIPADO QUE DEBE DE TENER
         customerId: formData.get('customerId'),
         amount: formData.get('amount'),
         status: formData.get('status'),
     });
+
+    // If form validation fails, return errors early. Otherwise, continue.
+    if (!validatedFields.success) {
+        return {
+          errors: validatedFields.error.flatten().fieldErrors,
+          message: 'Missing Fields. Failed to Create Invoice.',
+        };
+      }
+
+    // Prepare data for insertion into the database
+    const { customerId, amount, status } = validatedFields.data;
     const amountInCents = amount * 100;
     const date = new Date().toISOString().split('T')[0];
 
-    await sql `
-        INSERT INTO invoices (customer_id, amount, status, date)
-        VALUES (${customerId}, ${amountInCents}, ${status}, ${date})
-    `;
-
+    // Insert data into the database
+    try {
+        await sql`
+          INSERT INTO invoices (customer_id, amount, status, date)
+          VALUES (${customerId}, ${amountInCents}, ${status}, ${date})
+        `;
+    } catch (error) {
+    return {
+        // If a database error occurs, return a more specific error.
+        message: 'Database Error: Failed to Create Invoice by: ' + error,
+    };
+    }
     revalidatePath('/dashboard/invoices');//para que vuelva a hacer las consultas y se actualice el cache
     redirect('/dashboard/invoices')
 }
+
+export async function updateInvoice(id: string, formData: FormData) {
+    const { customerId, amount, status } = UpdateInvoice.parse({
+      customerId: formData.get('customerId'),
+      amount: formData.get('amount'),
+      status: formData.get('status'),
+    });
+   
+    const amountInCents = amount * 100;
+   
+    try {
+        await sql`
+        UPDATE invoices
+        SET customer_id = ${customerId}, amount = ${amountInCents}, status = ${status}
+        WHERE id = ${id}
+        `;
+    } catch (error) {
+        return { message: 'Database Error: Failed to Update Invoice by: ' + error };
+    }
+   
+    revalidatePath('/dashboard/invoices');
+    redirect('/dashboard/invoices');
+  }
+
+  export async function deleteInvoice(id: string) {
+    try {
+        await sql`DELETE FROM invoices WHERE id = ${id}`;
+        revalidatePath('/dashboard/invoices');
+        return { message: 'Deleted Invoice.' };
+    } catch (error) {
+        return { message: 'Database Error: Failed to Delete Invoice by: ' + error };
+    }
+  }
